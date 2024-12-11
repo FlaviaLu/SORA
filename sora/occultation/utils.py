@@ -1,4 +1,5 @@
 import numpy as np
+import matplotlib.pylab as pl
 import astropy.constants as const
 import astropy.units as u
 from astropy.coordinates import SkyOffsetFrame
@@ -289,3 +290,167 @@ def calc_sun_dif_ld(body_coord, star_coord, time, observer="geocenter"):
     dra_s, ddec_s = star_coord.spherical_offsets_to(os_star)  # computes offset between corrected and astrometric
 
     return dra_b - dra_s, ddec_b - ddec_s
+
+def maclaurin_density(P: np.ndarray, oblateness: np.ndarray) -> tuple: # creates a tuple with the input arrays
+    '''
+    Calculates the density of an object assuming a Maclaurin equilibrium spheroid 
+    using the provided oblateness and rotational period (hours).
+    
+    Parameters
+    ----------
+    P : float, int, np.ndarray
+        The body rotational period candidates should be given in hours.
+    
+    oblateness : float, np.ndarray
+        The true oblateness value(s) to be used in the calculation.
+    
+    Returns
+    -------
+    tuple
+        A tuple containing the period in hours, used oblateness values, 
+        and the calculated density in g/cm³.
+    
+    Raises
+    ------
+    ValueError
+        If inputs are invalid (e.g., mismatched lengths or empty inputs).
+    '''
+    # According chatgpt this "Exceptions provide a more robust way to 
+    # handle errors and allow users of the function to handle them programmatically, rather than just printing an error message and continuing."
+    if len(P) == 0:
+        raise ValueError('No rotational period provided. Please provide at least one rotational period (hours).')
+    if len(P) != len(oblateness):
+        raise ValueError('Both arrays must have the same length.')
+
+    # Convert periods to seconds
+    P_sec = (P * u.h).to(u.s)
+
+    # Calculate angular velocity
+    Omega = (2 * np.pi) / P_sec
+        
+    Psi = np.arccos(np.clip(1 - oblateness, 0, 1))
+
+    # Calculate the sine and cosine parts of the density equation
+    A = (np.sin(Psi)**2) * np.tan(Psi)
+    B = (2 * Psi * (2 + np.cos(2 * Psi))) - (3 * np.sin(2 * Psi))
+    C = A / B
+
+    # Calculate the density
+    rho = C * (Omega**2 / (np.pi * const.G))
+
+    # Convert the result to g/cm³
+    rho = rho.to(u.g / u.cm**3)
+
+    return P, oblateness, np.round(rho.value, 3)
+
+def maclaurin_density_interval(P: float, oblateness_range: np.ndarray) -> list:
+    '''
+    Calculates densities for a given rotational period over a range of oblateness values.
+
+    Parameters
+    ----------
+    P : float
+        The body rotational period in hours.
+    
+    oblateness_range : np.ndarray
+        An array of oblateness values (0 to 1) to evaluate.
+
+    Returns
+    -------
+    list
+        A list of tuples containing (oblateness, density in g/cm³).
+    '''
+    densities = []
+
+    for oblateness in oblateness_range:
+        try:
+            _, _, density = maclaurin_density(np.array([P]), np.array([oblateness]))
+            densities.append((oblateness, density[0]))  # Store tuples of (oblateness, density)
+        except ValueError as e:
+            print(f"Error for oblateness {oblateness}: {e}")
+
+    return densities
+
+def maclaurin_density_plot(rotational_periods, oblateness_occ_range: np.ndarray, 
+                           oblateness_default_range: np.ndarray, zoom=False, path='.',
+                           filename='Densities_plot'):
+    '''
+    Calculates the densities for a list of rotational periods over a range of oblateness values and represent them into a plot. 
+
+    Parameters
+    ----------
+    rotational_periods: list
+        A list ocntaining all the suspected rotational periods for the object.
+    
+    oblateness_occ_range: np.array
+        An array of the object oblateness candidates coming from the occultation.
+
+    oblateness_default_range:np.array
+        An array containing the extra interval to explore and provide a better look in the plot. 
+    
+    zoom: Bool
+        Zoom in the plot to the region of the provided oblatenesses. 
+        Default=False
+    
+    path: str
+        Provide the path to save the plot.
+        Default = '.'
+
+    filename: str
+        Provides the name to save the plot. 
+        Default=Densities_plot
+    '''
+    # Ensure rotational_periods is a list
+    if isinstance(rotational_periods, (float, int)):
+        rotational_periods = [rotational_periods]
+
+    # Create the plot
+    pl.figure(figsize=(10, 6))
+    
+    epsilon, rho = [],[]
+    rotational_periods.sort()
+    for P in rotational_periods:
+        # Calculate default densities
+        results_default = maclaurin_density_interval(P, oblateness_default_range)
+        oblateness_default, density_default = zip(*results_default) if results_default else ([], [])
+        
+        # Plot default densities
+        pl.plot(density_default, oblateness_default, 'k:', linewidth=2)
+
+        # Calculate occultation densities
+        results_occ = maclaurin_density_interval(P, oblateness_occ_range)
+        oblateness_occ, density_occ = zip(*results_occ) if results_occ else ([], [])
+
+        # Get min and max for density
+        min_density = min(density_occ) if density_occ else None
+        max_density = max(density_occ) if density_occ else None
+        
+        # Plot occultation densities with min/max density in the legend
+        pl.plot(density_occ, oblateness_occ, 
+                 label=f'{P} h (min: {min_density:.3f}, max: {max_density:.3f})', linewidth=2)
+        
+        rho.append(density_occ)
+        epsilon.append(oblateness_occ)
+    # Labeling the axes
+    pl.xlabel(r'Density (g m$^{-3}$)')
+    pl.ylabel('True Oblateness')
+    # plt.title('Density vs. Oblateness')
+    pl.legend()
+    pl.grid(ls=':')
+
+    if zoom == True:
+        rho = np.array(rho)
+        epsilon = np.array(epsilon)
+        pl.xlim((rho.min()-(rho.min()*0.5)),(rho.max()+(rho.max()*0.5)))  
+        pl.ylim((epsilon.min()-(epsilon.min()*0.5)), (epsilon.max()+(epsilon.max()*0.5))) 
+        # Save and show the plot
+        pl.tight_layout()
+        pl.savefig(path+filename+'_zoom.jpg', format='jpg')
+        pl.show()
+        pl.close()
+    else:
+        # Save and show the plot
+        pl.tight_layout()
+        pl.savefig(path+filename+'.jpg', format='jpg')
+        pl.show()
+        pl.close()
